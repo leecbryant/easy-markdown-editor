@@ -1491,9 +1491,9 @@ var timeFormat = {
 };
 
 var blockStyles = {
-    'bold': '**',
-    'code': '```',
-    'italic': '*',
+    'bold': ['**', '**'],
+    'code': ['```', '```'],
+    'italic': ['*', '*'],
 };
 
 /**
