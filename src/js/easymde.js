@@ -1492,7 +1492,7 @@ var timeFormat = {
 
 var blockStyles = {
     'bold': ['**', '**'],
-    'code': ['```', '```'],
+    'code': '```',
     'italic': ['*', '*'],
 };
 
