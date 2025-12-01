@@ -3,14 +3,21 @@
 var { EditorView } = require('@codemirror/view');
 
 function placeholder(text) {
-    return EditorView.domEventHandlers({
-        focus: function(event, view) {
-            updatePlaceholder(view, text);
-        },
-        blur: function(event, view) {
-            updatePlaceholder(view, text);
-        },
-    });
+    return [
+        EditorView.updateListener.of(function(update) {
+            if (update.docChanged) {
+                updatePlaceholder(update.view, text);
+            }
+        }),
+        EditorView.domEventHandlers({
+            focus: function(event, view) {
+                updatePlaceholder(view, text);
+            },
+            blur: function(event, view) {
+                updatePlaceholder(view, text);
+            },
+        }),
+    ];
 }
 
 function updatePlaceholder(view, text) {
