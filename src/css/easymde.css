@@ -35,6 +35,15 @@
     padding: 0 2px 0 6px;
 }
 
+.cm-placeholder-text {
+    position: absolute;
+    top: 10px;
+    left: 16px;
+    color: #999;
+    pointer-events: none;
+    opacity: 0.5;
+}
+
 .cm-focused .cm-selectionBackground {
     background: #d9d9d9 !important;
 }

@@ -27,9 +27,6 @@ function updatePlaceholder(view, text) {
     if (!hasContent && !placeholder) {
         var placeholderEl = document.createElement('div');
         placeholderEl.className = 'cm-placeholder-text';
-        placeholderEl.style.position = 'absolute';
-        placeholderEl.style.color = '#999';
-        placeholderEl.style.pointerEvents = 'none';
         placeholderEl.textContent = text;
         view.dom.appendChild(placeholderEl);
     } else if (hasContent && placeholder) {
