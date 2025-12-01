@@ -1,42 +1,59 @@
-// CodeMirror, copyright (c) by Marijn Haverbeke and others
-// Distributed under an MIT license: http://codemirror.net/LICENSE
+// Tab list handling for CodeMirror 6 - port of tablist.js
+var syntaxTree = require('@codemirror/language').syntaxTree;
+var indentMore = require('@codemirror/commands').indentMore;
+var indentLess = require('@codemirror/commands').indentLess;
+var EditorState = require('@codemirror/state').EditorState;
 
-var CodeMirror = require('codemirror');
-
-CodeMirror.commands.tabAndIndentMarkdownList = function (cm) {
-    var ranges = cm.listSelections();
-    var pos = ranges[0].head;
-    var eolState = cm.getStateAfter(pos.line);
-    var inList = eolState.list !== false;
-
-    if (inList) {
-        cm.execCommand('indentMore');
-        return;
+function isInList(state, pos) {
+    var tree = syntaxTree(state);
+    var node = tree.resolveInner(pos, -1);
+    
+    while (node) {
+        if (node.name === 'ListItem' || node.name === 'BulletList' || node.name === 'OrderedList') {
+            return true;
+        }
+        node = node.parent;
     }
+    return false;
+}
 
-    if (cm.options.indentWithTabs) {
-        cm.execCommand('insertTab');
-    } else {
-        var spaces = Array(cm.options.tabSize + 1).join(' ');
-        cm.replaceSelection(spaces);
+function tabAndIndentMarkdownList(view) {
+    var state = view.state;
+    var selection = state.selection.main;
+    
+    if (isInList(state, selection.head)) {
+        return indentMore(view);
     }
-};
+    
+    // Insert tab or spaces based on configuration
+    var tabSize = state.facet(EditorState.tabSize);
+    var indentUnit = ' '.repeat(tabSize);
+    
+    view.dispatch(state.update(state.replaceSelection(indentUnit)));
+    return true;
+}
 
-CodeMirror.commands.shiftTabAndUnindentMarkdownList = function (cm) {
-    var ranges = cm.listSelections();
-    var pos = ranges[0].head;
-    var eolState = cm.getStateAfter(pos.line);
-    var inList = eolState.list !== false;
-
-    if (inList) {
-        cm.execCommand('indentLess');
-        return;
+function shiftTabAndUnindentMarkdownList(view) {
+    var state = view.state;
+    var selection = state.selection.main;
+    
+    if (isInList(state, selection.head)) {
+        return indentLess(view);
     }
+    
+    return false;
+}
 
-    if (cm.options.indentWithTabs) {
-        cm.execCommand('insertTab');
-    } else {
-        var spaces = Array(cm.options.tabSize + 1).join(' ');
-        cm.replaceSelection(spaces);
-    }
-};
+// Keymaps for tab list handling
+var tabListKeymap = [
+    {
+        key: 'Tab',
+        run: tabAndIndentMarkdownList,
+    },
+    {
+        key: 'Shift-Tab',
+        run: shiftTabAndUnindentMarkdownList,
+    },
+];
+
+module.exports = { tabAndIndentMarkdownList: tabAndIndentMarkdownList, shiftTabAndUnindentMarkdownList: shiftTabAndUnindentMarkdownList, tabListKeymap: tabListKeymap };

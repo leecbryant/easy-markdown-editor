@@ -22,9 +22,7 @@ var banner = ['/**',
 
 
 var css_files = [
-    './node_modules/codemirror/lib/codemirror.css',
     './src/css/*.css',
-    './node_modules/codemirror-spell-checker/src/css/spell-checker.css',
 ];
 
 function lint() {
@@ -34,14 +32,53 @@ function lint() {
         .pipe(eslint.failAfterError());
 }
 
-function scripts() {
-    return browserify({entries: './src/js/easymde.js', standalone: 'EasyMDE'}).bundle()
-        .pipe(source('easymde.min.js'))
+function scriptsUnminified() {
+    return browserify({
+        entries: './src/js/easymde.js',
+        standalone: 'EasyMDE',
+        debug: true, // Include source maps
+        transform: [
+            ['babelify', {
+                presets: [['@babel/preset-env', {
+                    loose: false,
+                }]],
+                global: true,
+                ignore: [/\/node_modules\/(?!(@codemirror|@lezer|@marijn|style-mod|w3c-keyname))/],
+            }],
+        ],
+    }).bundle()
+        .pipe(source('easymde.js'))
         .pipe(buffer())
-        .pipe(terser())
         .pipe(header(banner, {pkg: pkg}))
         .pipe(gulp.dest('./dist/'));
 }
+
+function scriptsMinified() {
+    return browserify({
+        entries: './src/js/easymde.js',
+        standalone: 'EasyMDE',
+        transform: [
+            ['babelify', {
+                presets: [['@babel/preset-env', {
+                    loose: false,
+                }]],
+                global: true,
+                ignore: [/\/node_modules\/(?!(@codemirror|@lezer|@marijn|style-mod|w3c-keyname))/],
+            }],
+        ],
+    }).bundle()
+        .pipe(source('easymde.min.js'))
+        .pipe(buffer())
+        .pipe(terser({
+            compress: {
+                drop_console: false,
+            },
+        }))
+        .pipe(header(banner, {pkg: pkg}))
+        .pipe(gulp.dest('./dist/'));
+}
+
+var scripts = gulp.series(scriptsUnminified, scriptsMinified);
 
 function styles() {
     return gulp.src(css_files)

@@ -1,17 +1,39 @@
 'use strict';
-var CodeMirror = require('codemirror');
-require('codemirror/addon/edit/continuelist.js');
-require('./codemirror/tablist');
-require('codemirror/addon/display/fullscreen.js');
-require('codemirror/mode/markdown/markdown.js');
-require('codemirror/addon/mode/overlay.js');
-require('codemirror/addon/display/placeholder.js');
-require('codemirror/addon/display/autorefresh.js');
-require('codemirror/addon/selection/mark-selection.js');
-require('codemirror/addon/search/searchcursor.js');
-require('codemirror/mode/gfm/gfm.js');
-require('codemirror/mode/xml/xml.js');
-var CodeMirrorSpellChecker = require('codemirror-spell-checker');
+
+// CodeMirror 6 imports - use destructuring like the extension files
+var viewModule = require('@codemirror/view');
+var EditorView = viewModule.EditorView;
+var keymap = viewModule.keymap;
+var lineNumbers = viewModule.lineNumbers;
+var highlightActiveLine = viewModule.highlightActiveLine;
+var highlightSpecialChars = viewModule.highlightSpecialChars;
+var drawSelection = viewModule.drawSelection;
+var highlightActiveLineGutter = viewModule.highlightActiveLineGutter;
+var stateModule = require('@codemirror/state');
+var EditorState = stateModule.EditorState;
+var StateEffect = stateModule.StateEffect;
+var defaultKeymap = require('@codemirror/commands').defaultKeymap;
+var history = require('@codemirror/commands').history;
+var historyKeymap = require('@codemirror/commands').historyKeymap;
+var undoCommand = require('@codemirror/commands').undo;
+var redoCommand = require('@codemirror/commands').redo;
+var indentWithTab = require('@codemirror/commands').indentWithTab;
+var markdown = require('@codemirror/lang-markdown').markdown;
+var syntaxHighlighting = require('@codemirror/language').syntaxHighlighting;
+var defaultHighlightStyle = require('@codemirror/language').defaultHighlightStyle;
+var search = require('@codemirror/search').search;
+var searchKeymap = require('@codemirror/search').searchKeymap;
+
+// Custom CM extensions
+var placeholder = require('./codemirror/placeholder').placeholder;
+var fullscreen = require('./codemirror/fullscreen').fullscreen;
+var toggleFullscreenEffect = require('./codemirror/fullscreen').toggleFullscreenEffect;
+var imageUploadPlugin = require('./codemirror/image-upload').imageUploadPlugin;
+var shortcodeHighlight = require('./codemirror/shortcode-highlight').shortcodeHighlight;
+
+// CM helper functions
+var cm = require('./codemirror/editor-helpers');
+
 var marked = require('marked').marked;
 
 
@@ -304,47 +326,12 @@ function createTooltip(title, action, shortcuts) {
 }
 
 /**
- * The state of CodeMirror at the given position.
+ * The state of the editor at the given position.
+ * @param {EditorView} view - The CM6 editor view
+ * @param {number|object} pos - Position offset or {line, ch} object
  */
-function getState(cm, pos) {
-    pos = pos || cm.getCursor('start');
-    var stat = cm.getTokenAt(pos);
-    if (!stat.type) return {};
-
-    var types = stat.type.split(' ');
-
-    var ret = {},
-        data, text;
-    for (var i = 0; i < types.length; i++) {
-        data = types[i];
-        if (data === 'strong') {
-            ret.bold = true;
-        } else if (data === 'variable-2') {
-            text = cm.getLine(pos.line);
-            if (/^\s*\d+\.\s/.test(text)) {
-                ret['ordered-list'] = true;
-            } else {
-                ret['unordered-list'] = true;
-            }
-        } else if (data === 'atom') {
-            ret.quote = true;
-        } else if (data === 'em') {
-            ret.italic = true;
-        } else if (data === 'quote') {
-            ret.quote = true;
-        } else if (data === 'strikethrough') {
-            ret.strikethrough = true;
-        } else if (data === 'comment') {
-            ret.code = true;
-        } else if (data === 'link' && !ret.image) {
-            ret.link = true;
-        } else if (data === 'image') {
-            ret.image = true;
-        } else if (data.match(/^header(-[1-6])?$/)) {
-            ret[data.replace('header', 'heading')] = true;
-        }
-    }
-    return ret;
+function getState(view, pos) {
+    return cm.getState(view, pos);
 }
 
 
@@ -356,27 +343,28 @@ var saved_overflow = '';
  * @param {EasyMDE} editor
  */
 function toggleFullScreen(editor) {
-    // Set fullscreen
-    var cm = editor.codemirror;
-    cm.setOption('fullScreen', !cm.getOption('fullScreen'));
-
+    var view = editor.cm;
+    
+    // Toggle fullscreen state
+    editor.isFullscreen = !editor.isFullscreen;
+    view.dispatch({ effects: toggleFullscreenEffect.of(null) });
 
     // Prevent scrolling on body during fullscreen active
-    if (cm.getOption('fullScreen')) {
+    if (editor.isFullscreen) {
         saved_overflow = document.body.style.overflow;
         document.body.style.overflow = 'hidden';
     } else {
         document.body.style.overflow = saved_overflow;
     }
 
-    var wrapper = cm.getWrapperElement();
-    var sidebyside = wrapper.nextSibling;
+    var wrapper = view.dom;
+    var sidebyside = wrapper.nextElementSibling;
 
-    if (sidebyside.classList.contains('editor-preview-active-side')) {
+    if (sidebyside && sidebyside.classList && sidebyside.classList.contains('editor-preview-active-side')) {
         if (editor.options.sideBySideFullscreen === false) {
             // if side-by-side not-fullscreen ok, apply classes as needed
             var easyMDEContainer = wrapper.parentNode;
-            if (cm.getOption('fullScreen')) {
+            if (editor.isFullscreen) {
                 easyMDEContainer.classList.remove('sided--no-fullscreen');
             } else {
                 easyMDEContainer.classList.add('sided--no-fullscreen');
@@ -387,22 +375,24 @@ function toggleFullScreen(editor) {
     }
 
     if (editor.options.onToggleFullScreen) {
-        editor.options.onToggleFullScreen(cm.getOption('fullScreen') || false);
+        editor.options.onToggleFullScreen(editor.isFullscreen || false);
     }
 
     // Remove or set maxHeight
     if (typeof editor.options.maxHeight !== 'undefined') {
-        if (cm.getOption('fullScreen')) {
-            cm.getScrollerElement().style.removeProperty('height');
-            sidebyside.style.removeProperty('height');
+        if (editor.isFullscreen) {
+            view.scrollDOM.style.removeProperty('height');
+            if (sidebyside) sidebyside.style.removeProperty('height');
         } else {
-            cm.getScrollerElement().style.height = editor.options.maxHeight;
+            view.scrollDOM.style.height = editor.options.maxHeight;
             editor.setPreviewMaxHeight();
         }
     }
 
     // Update toolbar class
-    editor.toolbar_div.classList.toggle('fullscreen');
+    if (editor.toolbar_div) {
+        editor.toolbar_div.classList.toggle('fullscreen');
+    }
 
     // Update toolbar button
     if (editor.toolbarElements && editor.toolbarElements.fullscreen) {
@@ -443,349 +433,155 @@ function toggleStrikethrough(editor) {
  * @param {EasyMDE} editor
  */
 function toggleCodeBlock(editor) {
-    var fenceCharsToInsert = editor.options.blockStyles.code;
-
-    function fencing_line(line) {
-        /* return true, if this is a ``` or ~~~ line */
-        if (typeof line !== 'object') {
-            throw 'fencing_line() takes a \'line\' object (not a line number, or line text).  Got: ' + typeof line + ': ' + line;
-        }
-        return line.styles && line.styles[2] && line.styles[2].indexOf('formatting-code-block') !== -1;
-    }
-
-    function token_state(token) {
-        // base goes an extra level deep when mode backdrops are used, e.g. spellchecker on
-        return token.state.base.base || token.state.base;
-    }
-
-    function code_type(cm, line_num, line, firstTok, lastTok) {
-        /*
-         * Return "single", "indented", "fenced" or false
-         *
-         * cm and line_num are required.  Others are optional for efficiency
-         *   To check in the middle of a line, pass in firstTok yourself.
-         */
-        line = line || cm.getLineHandle(line_num);
-        firstTok = firstTok || cm.getTokenAt({
-            line: line_num,
-            ch: 1,
-        });
-        lastTok = lastTok || (!!line.text && cm.getTokenAt({
-            line: line_num,
-            ch: line.text.length - 1,
-        }));
-        var types = firstTok.type ? firstTok.type.split(' ') : [];
-        if (lastTok && token_state(lastTok).indentedCode) {
-            // have to check last char, since first chars of first line aren"t marked as indented
-            return 'indented';
-        } else if (types.indexOf('comment') === -1) {
-            // has to be after "indented" check, since first chars of first indented line aren"t marked as such
-            return false;
-        } else if (token_state(firstTok).fencedChars || token_state(lastTok).fencedChars || fencing_line(line)) {
-            return 'fenced';
+    var view = editor.cm;
+    var fenceChars = editor.options.blockStyles.code;
+    
+    var startPoint = cm.getCursor(view, 'start');
+    var endPoint = cm.getCursor(view, 'end');
+    
+    // Check if we have a selection
+    var hasSelection = startPoint.line !== endPoint.line || startPoint.ch !== endPoint.ch;
+    
+    if (!hasSelection) {
+        // No selection - toggle inline code on current word or insert code fences
+        var text = cm.getLine(view, startPoint.line);
+        
+        // Check if we're inside inline code
+        var beforeCursor = text.substring(0, startPoint.ch);
+        var afterCursor = text.substring(startPoint.ch);
+        
+        if (/`[^`]*$/.test(beforeCursor) && /^[^`]*`/.test(afterCursor)) {
+            // Inside inline code - remove it
+            var start = beforeCursor.lastIndexOf('`');
+            var end = afterCursor.indexOf('`') + startPoint.ch;
+            
+            cm.replaceRange(view, 
+                text.substring(0, start) + text.substring(start + 1, end) + text.substring(end + 1),
+                { line: startPoint.line, ch: 0 },
+                { line: startPoint.line, ch: text.length },
+            );
+            cm.setCursor(view, startPoint.line, start);
         } else {
-            return 'single';
+            // Not in code - insert fenced code block
+            var blockIndent = text.match(/^\s*/)[0];
+            var newText = '\n' + blockIndent + fenceChars + '\n' + blockIndent + '\n' + blockIndent + fenceChars + '\n';
+            
+            cm.replaceRange(view, newText,
+                { line: startPoint.line, ch: text.length },
+                { line: startPoint.line, ch: text.length },
+            );
+            cm.setCursor(view, startPoint.line + 2, blockIndent.length);
         }
-    }
-
-    function insertFencingAtSelection(cm, cur_start, cur_end, fenceCharsToInsert) {
-        var start_line_sel = cur_start.line + 1,
-            end_line_sel = cur_end.line + 1,
-            sel_multi = cur_start.line !== cur_end.line,
-            repl_start = fenceCharsToInsert + '\n',
-            repl_end = '\n' + fenceCharsToInsert;
-        if (sel_multi) {
-            end_line_sel++;
-        }
-        // handle last char including \n or not
-        if (sel_multi && cur_end.ch === 0) {
-            repl_end = fenceCharsToInsert + '\n';
-            end_line_sel--;
-        }
-        _replaceSelection(cm, false, [repl_start, repl_end]);
-        cm.setSelection({
-            line: start_line_sel,
-            ch: 0,
-        }, {
-            line: end_line_sel,
-            ch: 0,
-        });
-    }
-
-    var cm = editor.codemirror,
-        cur_start = cm.getCursor('start'),
-        cur_end = cm.getCursor('end'),
-        tok = cm.getTokenAt({
-            line: cur_start.line,
-            ch: cur_start.ch || 1,
-        }), // avoid ch 0 which is a cursor pos but not token
-        line = cm.getLineHandle(cur_start.line),
-        is_code = code_type(cm, cur_start.line, line, tok);
-    var block_start, block_end, lineCount;
-
-    if (is_code === 'single') {
-        // similar to some EasyMDE _toggleBlock logic
-        var start = line.text.slice(0, cur_start.ch).replace('`', ''),
-            end = line.text.slice(cur_start.ch).replace('`', '');
-        cm.replaceRange(start + end, {
-            line: cur_start.line,
-            ch: 0,
-        }, {
-            line: cur_start.line,
-            ch: 99999999999999,
-        });
-        cur_start.ch--;
-        if (cur_start !== cur_end) {
-            cur_end.ch--;
-        }
-        cm.setSelection(cur_start, cur_end);
-        cm.focus();
-    } else if (is_code === 'fenced') {
-        if (cur_start.line !== cur_end.line || cur_start.ch !== cur_end.ch) {
-            // use selection
-
-            // find the fenced line so we know what type it is (tilde, backticks, number of them)
-            for (block_start = cur_start.line; block_start >= 0; block_start--) {
-                line = cm.getLineHandle(block_start);
-                if (fencing_line(line)) {
-                    break;
-                }
-            }
-            var fencedTok = cm.getTokenAt({
-                line: block_start,
-                ch: 1,
-            });
-            var fence_chars = token_state(fencedTok).fencedChars;
-            var start_text, start_line;
-            var end_text, end_line;
-            // check for selection going up against fenced lines, in which case we don't want to add more fencing
-            if (fencing_line(cm.getLineHandle(cur_start.line))) {
-                start_text = '';
-                start_line = cur_start.line;
-            } else if (fencing_line(cm.getLineHandle(cur_start.line - 1))) {
-                start_text = '';
-                start_line = cur_start.line - 1;
-            } else {
-                start_text = fence_chars + '\n';
-                start_line = cur_start.line;
-            }
-            if (fencing_line(cm.getLineHandle(cur_end.line))) {
-                end_text = '';
-                end_line = cur_end.line;
-                if (cur_end.ch === 0) {
-                    end_line += 1;
-                }
-            } else if (cur_end.ch !== 0 && fencing_line(cm.getLineHandle(cur_end.line + 1))) {
-                end_text = '';
-                end_line = cur_end.line + 1;
-            } else {
-                end_text = fence_chars + '\n';
-                end_line = cur_end.line + 1;
-            }
-            if (cur_end.ch === 0) {
-                // full last line selected, putting cursor at beginning of next
-                end_line -= 1;
-            }
-            cm.operation(function () {
-                // end line first, so that line numbers don't change
-                cm.replaceRange(end_text, {
-                    line: end_line,
-                    ch: 0,
-                }, {
-                    line: end_line + (end_text ? 0 : 1),
-                    ch: 0,
-                });
-                cm.replaceRange(start_text, {
-                    line: start_line,
-                    ch: 0,
-                }, {
-                    line: start_line + (start_text ? 0 : 1),
-                    ch: 0,
-                });
-            });
-            cm.setSelection({
-                line: start_line + (start_text ? 1 : 0),
-                ch: 0,
-            }, {
-                line: end_line + (start_text ? 1 : -1),
-                ch: 0,
-            });
-            cm.focus();
-        } else {
-            // no selection, search for ends of this fenced block
-            var search_from = cur_start.line;
-            if (fencing_line(cm.getLineHandle(cur_start.line))) { // gets a little tricky if cursor is right on a fenced line
-                if (code_type(cm, cur_start.line + 1) === 'fenced') {
-                    block_start = cur_start.line;
-                    search_from = cur_start.line + 1; // for searching for "end"
-                } else {
-                    block_end = cur_start.line;
-                    search_from = cur_start.line - 1; // for searching for "start"
-                }
-            }
-            if (block_start === undefined) {
-                for (block_start = search_from; block_start >= 0; block_start--) {
-                    line = cm.getLineHandle(block_start);
-                    if (fencing_line(line)) {
-                        break;
-                    }
-                }
-            }
-            if (block_end === undefined) {
-                lineCount = cm.lineCount();
-                for (block_end = search_from; block_end < lineCount; block_end++) {
-                    line = cm.getLineHandle(block_end);
-                    if (fencing_line(line)) {
-                        break;
-                    }
-                }
-            }
-            cm.operation(function () {
-                cm.replaceRange('', {
-                    line: block_start,
-                    ch: 0,
-                }, {
-                    line: block_start + 1,
-                    ch: 0,
-                });
-                cm.replaceRange('', {
-                    line: block_end - 1,
-                    ch: 0,
-                }, {
-                    line: block_end,
-                    ch: 0,
-                });
-            });
-            cm.focus();
-        }
-    } else if (is_code === 'indented') {
-        if (cur_start.line !== cur_end.line || cur_start.ch !== cur_end.ch) {
-            // use selection
-            block_start = cur_start.line;
-            block_end = cur_end.line;
-            if (cur_end.ch === 0) {
-                block_end--;
-            }
-        } else {
-            // no selection, search for ends of this indented block
-            for (block_start = cur_start.line; block_start >= 0; block_start--) {
-                line = cm.getLineHandle(block_start);
-                if (line.text.match(/^\s*$/)) {
-                    // empty or all whitespace - keep going
-                    continue;
-                } else {
-                    if (code_type(cm, block_start, line) !== 'indented') {
-                        block_start += 1;
-                        break;
-                    }
-                }
-            }
-            lineCount = cm.lineCount();
-            for (block_end = cur_start.line; block_end < lineCount; block_end++) {
-                line = cm.getLineHandle(block_end);
-                if (line.text.match(/^\s*$/)) {
-                    // empty or all whitespace - keep going
-                    continue;
-                } else {
-                    if (code_type(cm, block_end, line) !== 'indented') {
-                        block_end -= 1;
-                        break;
-                    }
-                }
-            }
-        }
-        // if we are going to un-indent based on a selected set of lines, and the next line is indented too, we need to
-        // insert a blank line so that the next line(s) continue to be indented code
-        var next_line = cm.getLineHandle(block_end + 1),
-            next_line_last_tok = next_line && cm.getTokenAt({
-                line: block_end + 1,
-                ch: next_line.text.length - 1,
-            }),
-            next_line_indented = next_line_last_tok && token_state(next_line_last_tok).indentedCode;
-        if (next_line_indented) {
-            cm.replaceRange('\n', {
-                line: block_end + 1,
-                ch: 0,
-            });
-        }
-
-        for (var i = block_start; i <= block_end; i++) {
-            cm.indentLine(i, 'subtract'); // TODO: this doesn't get tracked in the history, so can't be undone :(
-        }
-        cm.focus();
     } else {
-        // insert code formatting
-        var no_sel_and_starting_of_line = (cur_start.line === cur_end.line && cur_start.ch === cur_end.ch && cur_start.ch === 0);
-        var sel_multi = cur_start.line !== cur_end.line;
-        if (no_sel_and_starting_of_line || sel_multi) {
-            insertFencingAtSelection(cm, cur_start, cur_end, fenceCharsToInsert);
+        // Has selection
+        var firstLine = cm.getLine(view, startPoint.line);
+        
+        // Check if selection is already fenced
+        var isFenced = false;
+        if (startPoint.line > 0 && endPoint.line < cm.lineCount(view) - 1) {
+            var lineBefore = cm.getLine(view, startPoint.line - 1);
+            var lineAfter = cm.getLine(view, endPoint.line + 1);
+            isFenced = /^```/.test(lineBefore.trim()) && /^```/.test(lineAfter.trim());
+        }
+        
+        if (isFenced) {
+            // Remove fences
+            var removeChanges = [
+                {
+                    from: cm.posToOffset(view.state.doc, { line: endPoint.line + 1, ch: 0 }),
+                    to: cm.posToOffset(view.state.doc, { line: endPoint.line + 2, ch: 0 }),
+                    insert: '',
+                },
+                {
+                    from: cm.posToOffset(view.state.doc, { line: startPoint.line - 1, ch: 0 }),
+                    to: cm.posToOffset(view.state.doc, { line: startPoint.line, ch: 0 }),
+                    insert: '',
+                },
+            ];
+            view.dispatch({ changes: removeChanges });
         } else {
-            _replaceSelection(cm, false, ['`', '`']);
+            // Add fences
+            var fenceIndent = firstLine.match(/^\s*/)[0];
+            var addChanges = [
+                {
+                    from: cm.posToOffset(view.state.doc, { line: startPoint.line, ch: 0 }),
+                    to: cm.posToOffset(view.state.doc, { line: startPoint.line, ch: 0 }),
+                    insert: fenceIndent + fenceChars + '\n',
+                },
+                {
+                    from: cm.posToOffset(view.state.doc, { line: endPoint.line, ch: cm.getLine(view, endPoint.line).length }),
+                    to: cm.posToOffset(view.state.doc, { line: endPoint.line, ch: cm.getLine(view, endPoint.line).length }),
+                    insert: '\n' + fenceIndent + fenceChars,
+                },
+            ];
+            view.dispatch({ changes: addChanges });
         }
     }
+    
+    cm.focus(view);
 }
 
 /**
  * Action for toggling blockquote.
  */
 function toggleBlockquote(editor) {
-    _toggleLine(editor.codemirror, 'quote');
+    _toggleLine(editor.cm, 'quote');
 }
 
 /**
  * Action for toggling heading size: normal -> h1 -> h2 -> h3 -> h4 -> h5 -> h6 -> normal
  */
 function toggleHeadingSmaller(editor) {
-    _toggleHeading(editor.codemirror, 'smaller');
+    _toggleHeading(editor.cm, 'smaller');
 }
 
 /**
  * Action for toggling heading size: normal -> h6 -> h5 -> h4 -> h3 -> h2 -> h1 -> normal
  */
 function toggleHeadingBigger(editor) {
-    _toggleHeading(editor.codemirror, 'bigger');
+    _toggleHeading(editor.cm, 'bigger');
 }
 
 /**
  * Action for toggling heading size 1
  */
 function toggleHeading1(editor) {
-    _toggleHeading(editor.codemirror, undefined, 1);
+    _toggleHeading(editor.cm, undefined, 1);
 }
 
 /**
  * Action for toggling heading size 2
  */
 function toggleHeading2(editor) {
-    _toggleHeading(editor.codemirror, undefined, 2);
+    _toggleHeading(editor.cm, undefined, 2);
 }
 
 /**
  * Action for toggling heading size 3
  */
 function toggleHeading3(editor) {
-    _toggleHeading(editor.codemirror, undefined, 3);
+    _toggleHeading(editor.cm, undefined, 3);
 }
 
 /**
  * Action for toggling heading size 4
  */
 function toggleHeading4(editor) {
-    _toggleHeading(editor.codemirror, undefined, 4);
+    _toggleHeading(editor.cm, undefined, 4);
 }
 
 /**
  * Action for toggling heading size 5
  */
 function toggleHeading5(editor) {
-    _toggleHeading(editor.codemirror, undefined, 5);
+    _toggleHeading(editor.cm, undefined, 5);
 }
 
 /**
  * Action for toggling heading size 6
  */
 function toggleHeading6(editor) {
-    _toggleHeading(editor.codemirror, undefined, 6);
+    _toggleHeading(editor.cm, undefined, 6);
 }
 
 
@@ -793,14 +589,12 @@ function toggleHeading6(editor) {
  * Action for toggling ul.
  */
 function toggleUnorderedList(editor) {
-    var cm = editor.codemirror;
-
     var listStyle = '*'; // Default
     if (['-', '+', '*'].includes(editor.options.unorderedListStyle)) {
         listStyle = editor.options.unorderedListStyle;
     }
 
-    _toggleLine(cm, 'unordered-list', listStyle);
+    _toggleLine(editor.cm, 'unordered-list', listStyle);
 }
 
 
@@ -808,14 +602,14 @@ function toggleUnorderedList(editor) {
  * Action for toggling ol.
  */
 function toggleOrderedList(editor) {
-    _toggleLine(editor.codemirror, 'ordered-list');
+    _toggleLine(editor.cm, 'ordered-list');
 }
 
 /**
  * Action for clean block (remove headline, list, blockquote code, markers)
  */
 function cleanBlock(editor) {
-    _cleanBlock(editor.codemirror);
+    _cleanBlock(editor.cm);
 }
 
 /**
@@ -875,19 +669,19 @@ function drawUploadedImage(editor) {
  * @param {string} url The url of the uploaded image
  */
 function afterImageUploaded(editor, url) {
-    var cm = editor.codemirror;
-    var stat = getState(cm);
+    var view = editor.cm;
+    var stat = getState(view);
     var options = editor.options;
     var imageName = url.substr(url.lastIndexOf('/') + 1);
     var ext = imageName.substring(imageName.lastIndexOf('.') + 1).replace(/\?.*$/, '').toLowerCase();
 
     // Check if media is an image
     if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'apng', 'avif', 'webp'].includes(ext)) {
-        _replaceSelection(cm, stat.image, options.insertTexts.uploadedImage, url);
+        _replaceSelection(view, stat.image, options.insertTexts.uploadedImage, url);
     } else {
         var text_link = options.insertTexts.link;
         text_link[0] = '[' + imageName;
-        _replaceSelection(cm, stat.link, text_link, url);
+        _replaceSelection(view, stat.link, text_link, url);
     }
 
     // show uploaded image filename for 1000ms
@@ -902,10 +696,10 @@ function afterImageUploaded(editor, url) {
  * @param {EasyMDE} editor
  */
 function drawTable(editor) {
-    var cm = editor.codemirror;
-    var stat = getState(cm);
+    var view = editor.cm;
+    var stat = getState(view);
     var options = editor.options;
-    _replaceSelection(cm, stat.table, options.insertTexts.table);
+    _replaceSelection(view, stat.table, options.insertTexts.table);
 }
 
 /**
@@ -913,10 +707,10 @@ function drawTable(editor) {
  * @param {EasyMDE} editor
  */
 function drawHorizontalRule(editor) {
-    var cm = editor.codemirror;
-    var stat = getState(cm);
+    var view = editor.cm;
+    var stat = getState(view);
     var options = editor.options;
-    _replaceSelection(cm, stat.image, options.insertTexts.horizontalRule);
+    _replaceSelection(view, stat.image, options.insertTexts.horizontalRule);
 }
 
 
@@ -925,9 +719,8 @@ function drawHorizontalRule(editor) {
  * @param {EasyMDE} editor
  */
 function undo(editor) {
-    var cm = editor.codemirror;
-    cm.undo();
-    cm.focus();
+    undoCommand(editor.cm);
+    editor.cm.focus();
 }
 
 
@@ -936,9 +729,8 @@ function undo(editor) {
  * @param {EasyMDE} editor
  */
 function redo(editor) {
-    var cm = editor.codemirror;
-    cm.redo();
-    cm.focus();
+    redoCommand(editor.cm);
+    editor.cm.focus();
 }
 
 
@@ -947,9 +739,19 @@ function redo(editor) {
  * @param {EasyMDE} editor
  */
 function toggleSideBySide(editor) {
-    var cm = editor.codemirror;
-    var wrapper = cm.getWrapperElement();
+    var view = editor.cm;
+    var wrapper = view.dom;
     var preview = wrapper.nextSibling;
+    
+    // Create preview if it doesn't exist
+    if (!preview || !preview.classList.contains('editor-preview-side')) {
+        preview = editor.gui.sideBySide;
+        if (!preview) {
+            console.error('EasyMDE: Side-by-side preview not initialized');
+            return;
+        }
+    }
+    
     var toolbarButton = editor.toolbarElements && editor.toolbarElements['side-by-side'];
     var useSideBySideListener = false;
 
@@ -968,7 +770,7 @@ function toggleSideBySide(editor) {
         // give some time for the transition from editor.css to fire and the view to slide from right to left,
         // instead of just appearing.
         setTimeout(function () {
-            if (!cm.getOption('fullScreen')) {
+            if (!editor.isFullscreen) {
                 if (editor.options.sideBySideFullscreen === false) {
                     // if side-by-side not-fullscreen ok, add classes when not fullscreen and showing side
                     easyMDEContainer.classList.add('sided--no-fullscreen');
@@ -1000,8 +802,8 @@ function toggleSideBySide(editor) {
         }
     };
 
-    if (!cm.sideBySideRenderingFunction) {
-        cm.sideBySideRenderingFunction = sideBySideRenderingFunction;
+    if (!editor._sideBySideRenderingFunction) {
+        editor._sideBySideRenderingFunction = sideBySideRenderingFunction;
     }
 
     if (useSideBySideListener) {
@@ -1009,13 +811,20 @@ function toggleSideBySide(editor) {
         if (newValue != null) {
             preview.innerHTML = newValue;
         }
-        cm.on('update', cm.sideBySideRenderingFunction);
+        // Add CM6 update listener
+        if (!editor._sideBySideUpdateEffect) {
+            editor._sideBySideUpdateEffect = EditorView.updateListener.of(function(update) {
+                if (update.docChanged && editor._sideBySideRenderingFunction) {
+                    editor._sideBySideRenderingFunction();
+                }
+            });
+            view.dispatch({ effects: StateEffect.appendConfig.of([editor._sideBySideUpdateEffect]) });
+        }
     } else {
-        cm.off('update', cm.sideBySideRenderingFunction);
+        // Note: CM6 extensions can't be easily removed, so we just clear the function
+        // The update listener will check if the function exists before calling
+        editor._sideBySideRenderingFunction = null;
     }
-
-    // Refresh to fix selection being off (#309)
-    cm.refresh();
 }
 
 
@@ -1024,21 +833,34 @@ function toggleSideBySide(editor) {
  * @param {EasyMDE} editor
  */
 function togglePreview(editor) {
-    var cm = editor.codemirror;
-    var wrapper = cm.getWrapperElement();
+    var view = editor.cm;
+    var wrapper = view.dom;
+    var container = wrapper.parentNode; // .EasyMDEContainer
+    
+    if (!container || !container.parentNode) {
+        console.error('EasyMDE: Editor container not found in DOM');
+        return;
+    }
+    
     var toolbar_div = editor.toolbar_div;
     var toolbar = editor.options.toolbar ? editor.toolbarElements.preview : false;
-    var preview = wrapper.lastChild;
+    
+    // Look for preview inside the container, after the wrapper
+    var preview = container.querySelector('.editor-preview-full');
+    if (!preview || !preview.classList || !preview.classList.contains('editor-preview-full')) {
+        preview = null;
+    }
 
-    // Turn off side by side if needed
-    var sidebyside = cm.getWrapperElement().nextSibling;
-    if (sidebyside.classList.contains('editor-preview-active-side'))
+    // Turn off side by side if needed (side-by-side is inside container, after wrapper)
+    // Use nextElementSibling to skip text nodes
+    var sidebyside = wrapper.nextElementSibling;
+    if (sidebyside && sidebyside.classList && sidebyside.classList.contains('editor-preview-active-side'))
         toggleSideBySide(editor);
 
-    if (!preview || !preview.classList.contains('editor-preview-full')) {
+    if (!preview) {
 
         preview = document.createElement('div');
-        preview.className = 'editor-preview-full';
+        preview.className = 'editor-preview-full editor-preview';
 
         if (editor.options.previewClass) {
 
@@ -1052,13 +874,18 @@ function togglePreview(editor) {
             }
         }
 
-        wrapper.appendChild(preview);
+        // Insert preview inside container, after the wrapper
+        container.appendChild(preview);
     }
 
     if (preview.classList.contains('editor-preview-active')) {
         preview.classList.remove('editor-preview-active');
+        container.classList.remove('preview-active');
+        wrapper.style.removeProperty('display'); // Show editor
         if (toolbar) {
             toolbar.classList.remove('active');
+        }
+        if (toolbar_div) {
             toolbar_div.classList.remove('disabled-for-preview');
         }
     } else {
@@ -1067,9 +894,13 @@ function togglePreview(editor) {
         // instead of just appearing.
         setTimeout(function () {
             preview.classList.add('editor-preview-active');
+            container.classList.add('preview-active');
+            wrapper.style.setProperty('display', 'none', 'important'); // Hide editor with !important
         }, 1);
         if (toolbar) {
             toolbar.classList.add('active');
+        }
+        if (toolbar_div) {
             toolbar_div.classList.add('disabled-for-preview');
         }
     }
@@ -1081,196 +912,229 @@ function togglePreview(editor) {
 
 }
 
-function _replaceSelection(cm, active, startEnd, url) {
-    if (cm.getWrapperElement().lastChild.classList.contains('editor-preview-active'))
+function _replaceSelection(view, active, startEnd, url) {
+    if (view.dom.lastChild && view.dom.lastChild.classList.contains('editor-preview-active'))
         return;
 
     var text;
     var start = startEnd[0];
     var end = startEnd[1];
-    var startPoint = {},
-        endPoint = {};
-    Object.assign(startPoint, cm.getCursor('start'));
-    Object.assign(endPoint, cm.getCursor('end'));
+    var startPoint = cm.getCursor(view, 'start');
+    var endPoint = cm.getCursor(view, 'end');
+    
     if (url) {
-        start = start.replace('#url#', url);  // url is in start for upload-image
+        start = start.replace('#url#', url);
         end = end.replace('#url#', url);
     }
+    
     if (active) {
-        text = cm.getLine(startPoint.line);
+        text = cm.getLine(view, startPoint.line);
         start = text.slice(0, startPoint.ch);
         end = text.slice(startPoint.ch);
-        cm.replaceRange(start + end, {
+        cm.replaceRange(view, start + end, {
             line: startPoint.line,
             ch: 0,
+        }, {
+            line: startPoint.line,
+            ch: 99999999999999,
         });
     } else {
-        text = cm.getSelection();
-        cm.replaceSelection(start + text + end);
+        text = cm.getSelection(view);
+        cm.replaceSelection(view, start + text + end);
 
         startPoint.ch += start.length;
-        if (startPoint !== endPoint) {
+        if (startPoint.line !== endPoint.line || startPoint.ch !== endPoint.ch) {
             endPoint.ch += start.length;
         }
     }
-    cm.setSelection(startPoint, endPoint);
-    cm.focus();
+    cm.setSelection(view, startPoint, endPoint);
+    cm.focus(view);
 }
 
 
-function _toggleHeading(cm, direction, size) {
-    if (cm.getWrapperElement().lastChild.classList.contains('editor-preview-active'))
+function _toggleHeading(view, direction, size) {
+    if (view.dom.lastChild && view.dom.lastChild.classList.contains('editor-preview-active'))
         return;
 
-    var startPoint = cm.getCursor('start');
-    var endPoint = cm.getCursor('end');
+    var startPoint = cm.getCursor(view, 'start');
+    var endPoint = cm.getCursor(view, 'end');
+    
+    var changes = [];
     for (var i = startPoint.line; i <= endPoint.line; i++) {
-        (function (i) {
-            var text = cm.getLine(i);
-            var currHeadingLevel = text.search(/[^#]/);
+        var text = cm.getLine(view, i);
+        var currHeadingLevel = text.search(/[^#]/);
 
-            if (direction !== undefined) {
-                if (currHeadingLevel <= 0) {
-                    if (direction == 'bigger') {
-                        text = '###### ' + text;
-                    } else {
-                        text = '# ' + text;
-                    }
-                } else if (currHeadingLevel == 6 && direction == 'smaller') {
-                    text = text.substr(7);
-                } else if (currHeadingLevel == 1 && direction == 'bigger') {
-                    text = text.substr(2);
+        var newText;
+        if (direction !== undefined) {
+            if (currHeadingLevel <= 0) {
+                if (direction == 'bigger') {
+                    newText = '###### ' + text;
                 } else {
-                    if (direction == 'bigger') {
-                        text = text.substr(1);
-                    } else {
-                        text = '#' + text;
-                    }
+                    newText = '# ' + text;
                 }
+            } else if (currHeadingLevel == 6 && direction == 'smaller') {
+                newText = text.substr(7);
+            } else if (currHeadingLevel == 1 && direction == 'bigger') {
+                newText = text.substr(2);
             } else {
-                if (currHeadingLevel <= 0) {
-                    text = '#'.repeat(size) + ' ' + text;
-                } else if (currHeadingLevel == size) {
-                    text = text.substr(currHeadingLevel + 1);
+                if (direction == 'bigger') {
+                    newText = text.substr(1);
                 } else {
-                    text = '#'.repeat(size) + ' ' + text.substr(currHeadingLevel + 1);
+                    newText = '#' + text;
                 }
             }
+        } else {
+            if (currHeadingLevel <= 0) {
+                newText = '#'.repeat(size) + ' ' + text;
+            } else if (currHeadingLevel == size) {
+                newText = text.substr(currHeadingLevel + 1);
+            } else {
+                newText = '#'.repeat(size) + ' ' + text.substr(currHeadingLevel + 1);
+            }
+        }
 
-            cm.replaceRange(text, {
-                line: i,
-                ch: 0,
-            }, {
-                line: i,
-                ch: 99999999999999,
-            });
-        })(i);
+        changes.push({
+            from: cm.posToOffset(view.state.doc, { line: i, ch: 0 }),
+            to: cm.posToOffset(view.state.doc, { line: i, ch: text.length }),
+            insert: newText,
+        });
     }
-    cm.focus();
+    
+    if (changes.length > 0) {
+        view.dispatch({ changes: changes });
+    }
+    cm.focus(view);
 }
 
-
-function _toggleLine(cm, name, liststyle) {
-    if (cm.getWrapperElement().lastChild.classList.contains('editor-preview-active'))
+function _toggleLine(view, name) {
+    if (view.dom.lastChild && view.dom.lastChild.classList.contains('editor-preview-active'))
         return;
 
-    var listRegexp = /^(\s*)(\*|-|\+|\d*\.)(\s+)/;
-    var whitespacesRegexp = /^\s*/;
-
-    var stat = getState(cm);
-    var startPoint = cm.getCursor('start');
-    var endPoint = cm.getCursor('end');
+    var stat = cm.getState(view);
+    var startPoint = cm.getCursor(view, 'start');
+    var endPoint = cm.getCursor(view, 'end');
     var repl = {
         'quote': /^(\s*)>\s+/,
-        'unordered-list': listRegexp,
-        'ordered-list': listRegexp,
+        'unordered-list': /^(\s*)(\*|-|\+)\s+/,
+        'ordered-list': /^(\s*)\d+\.\s+/,
     };
-
-    var _getChar = function (name, i) {
-        var map = {
-            'quote': '>',
-            'unordered-list': liststyle,
-            'ordered-list': '%%i.',
-        };
-
-        return map[name].replace('%%i', i);
+    var map = {
+        'quote': '> ',
+        'unordered-list': '* ',
+        'ordered-list': '1. ',
     };
-
-    var _checkChar = function (name, char) {
-        var map = {
-            'quote': '>',
-            'unordered-list': '\\' + liststyle,
-            'ordered-list': '\\d+.',
-        };
-        var rt = new RegExp(map[name]);
-
-        return char && rt.test(char);
-    };
-
-    var _toggle = function (name, text, untoggleOnly) {
-        var arr = listRegexp.exec(text);
-        var char = _getChar(name, line);
-        if (arr !== null) {
-            if (_checkChar(name, arr[2])) {
-                char = '';
-            }
-            text = arr[1] + char + arr[3] + text.replace(whitespacesRegexp, '').replace(repl[name], '$1');
-        } else if (untoggleOnly == false) {
-            text = char + ' ' + text;
-        }
-        return text;
-    };
-
-    var line = 1;
+    
+    var changes = [];
     for (var i = startPoint.line; i <= endPoint.line; i++) {
-        (function (i) {
-            var text = cm.getLine(i);
-            if (stat[name]) {
-                text = text.replace(repl[name], '$1');
-            } else {
-                // If we're toggling unordered-list formatting, check if the current line
-                // is part of an ordered-list, and if so, untoggle that first.
-                // Workaround for https://github.com/Ionaru/easy-markdown-editor/issues/92
-                if (name == 'unordered-list') {
-                    text = _toggle('ordered-list', text, true);
-                }
-                text = _toggle(name, text, false);
-                line += 1;
-            }
-            cm.replaceRange(text, {
-                line: i,
-                ch: 0,
-            }, {
-                line: i,
-                ch: 99999999999999,
-            });
-        })(i);
+        var text = cm.getLine(view, i);
+        var newText;
+        
+        if (stat[name]) {
+            newText = text.replace(repl[name], '$1');
+        } else {
+            newText = map[name] + text;
+        }
+        
+        changes.push({
+            from: cm.posToOffset(view.state.doc, { line: i, ch: 0 }),
+            to: cm.posToOffset(view.state.doc, { line: i, ch: text.length }),
+            insert: newText,
+        });
     }
-    cm.focus();
+    
+    if (changes.length > 0) {
+        view.dispatch({ changes: changes });
+    }
+    cm.focus(view);
 }
 
-/**
- * @param {EasyMDE} editor
- * @param {'link' | 'image'} type
- * @param {string} startEnd
- * @param {string} url
- */
+function _toggleBlock(editor, type, blockStartEnd) {
+    if (editor.cm.dom.lastChild && editor.cm.dom.lastChild.classList.contains('editor-preview-active'))
+        return;
+
+    blockStartEnd = (typeof blockStartEnd === 'undefined') ? editor.options.blockStyles[type] : blockStartEnd;
+    var view = editor.cm;
+    var stat = cm.getState(view);
+    var text;
+    var start = blockStartEnd[0];
+    var end = blockStartEnd[1];
+
+    var startPoint = cm.getCursor(view, 'start');
+    var endPoint = cm.getCursor(view, 'end');
+
+    if (stat[type]) {
+        text = cm.getLine(view, startPoint.line);
+        start = text.slice(0, startPoint.ch);
+        end = text.slice(startPoint.ch);
+        
+        if (type == 'bold') {
+            start = start.replace(/(\*\*|__)(?![\s\S]*(\*\*|__))/, '');
+            end = end.replace(/(\*\*|__)/, '');
+        } else if (type == 'italic') {
+            start = start.replace(/(\*|_)(?![\s\S]*(\*|_))/, '');
+            end = end.replace(/(\*|_)/, '');
+        } else if (type == 'strikethrough') {
+            start = start.replace(/(~~)(?![\s\S]*(~~))/, '');
+            end = end.replace(/(~~)/, '');
+        }
+        
+        cm.replaceRange(view, start + end, {
+            line: startPoint.line,
+            ch: 0,
+        }, {
+            line: startPoint.line,
+            ch: 99999999999999,
+        });
+        
+        if (type == 'bold' || type == 'strikethrough') {
+            startPoint.ch -= 2;
+            if (startPoint.line !== endPoint.line || startPoint.ch !== endPoint.ch) {
+                endPoint.ch -= 2;
+            }
+        } else if (type == 'italic') {
+            startPoint.ch -= 1;
+            if (startPoint.line !== endPoint.line || startPoint.ch !== endPoint.ch) {
+                endPoint.ch -= 1;
+            }
+        }
+    } else {
+        text = cm.getSelection(view);
+        if (type == 'bold') {
+            text = text.split('**').join('');
+            text = text.split('__').join('');
+        } else if (type == 'italic') {
+            text = text.split('*').join('');
+            text = text.split('_').join('');
+        } else if (type == 'strikethrough') {
+            text = text.split('~~').join('');
+        }
+        cm.replaceSelection(view, start + text + end);
+
+        startPoint.ch += start.length;
+        endPoint.ch = startPoint.ch + text.length;
+    }
+
+    cm.setSelection(view, startPoint, endPoint);
+    cm.focus(view);
+}
+
 function _toggleLink(editor, type, startEnd, url) {
-    if (!editor.codemirror || editor.isPreviewActive()) {
+    if (!editor.cm || editor.isPreviewActive()) {
         return;
     }
 
-    var cm = editor.codemirror;
-    var stat = getState(cm);
+    var view = editor.cm;
+    var stat = cm.getState(view);
     var active = stat[type];
+    
     if (!active) {
-        _replaceSelection(cm, active, startEnd, url);
+        _replaceSelection(view, active, startEnd, url);
         return;
     }
 
-    var startPoint = cm.getCursor('start');
-    var endPoint = cm.getCursor('end');
-    var text = cm.getLine(startPoint.line);
+    var startPoint = cm.getCursor(view, 'start');
+    var endPoint = cm.getCursor(view, 'end');
+    var text = cm.getLine(view, startPoint.line);
     var start = text.slice(0, startPoint.ch);
     var end = text.slice(startPoint.ch);
 
@@ -1281,7 +1145,7 @@ function _toggleLink(editor, type, startEnd, url) {
     }
     end = end.replace(/]\(.*?\)/, '');
 
-    cm.replaceRange(start + end, {
+    cm.replaceRange(view, start + end, {
         line: startPoint.line,
         ch: 0,
     }, {
@@ -1290,105 +1154,35 @@ function _toggleLink(editor, type, startEnd, url) {
     });
 
     startPoint.ch -= startEnd[0].length;
-    if (startPoint !== endPoint) {
+    if (startPoint.line !== endPoint.line || startPoint.ch !== endPoint.ch) {
         endPoint.ch -= startEnd[0].length;
     }
-    cm.setSelection(startPoint, endPoint);
-    cm.focus();
+    cm.setSelection(view, startPoint, endPoint);
+    cm.focus(view);
 }
 
-/**
- * @param {EasyMDE} editor
- */
-function _toggleBlock(editor, type, start_chars, end_chars) {
-    if (!editor.codemirror || editor.isPreviewActive()) {
-        return;
-    }
-
-    end_chars = (typeof end_chars === 'undefined') ? start_chars : end_chars;
-    var cm = editor.codemirror;
-    var stat = getState(cm);
-
-    var text;
-    var start = start_chars;
-    var end = end_chars;
-
-    var startPoint = cm.getCursor('start');
-    var endPoint = cm.getCursor('end');
-
-    if (stat[type]) {
-        text = cm.getLine(startPoint.line);
-        start = text.slice(0, startPoint.ch);
-        end = text.slice(startPoint.ch);
-        if (type == 'bold') {
-            start = start.replace(/(\*\*|__)(?![\s\S]*(\*\*|__))/, '');
-            end = end.replace(/(\*\*|__)/, '');
-        } else if (type == 'italic') {
-            start = start.replace(/(\*|_)(?![\s\S]*(\*|_))/, '');
-            end = end.replace(/(\*|_)/, '');
-        } else if (type == 'strikethrough') {
-            start = start.replace(/(\*\*|~~)(?![\s\S]*(\*\*|~~))/, '');
-            end = end.replace(/(\*\*|~~)/, '');
-        }
-        cm.replaceRange(start + end, {
-            line: startPoint.line,
-            ch: 0,
-        }, {
-            line: startPoint.line,
-            ch: 99999999999999,
-        });
-
-        if (type == 'bold' || type == 'strikethrough') {
-            startPoint.ch -= 2;
-            if (startPoint !== endPoint) {
-                endPoint.ch -= 2;
-            }
-        } else if (type == 'italic') {
-            startPoint.ch -= 1;
-            if (startPoint !== endPoint) {
-                endPoint.ch -= 1;
-            }
-        }
-    } else {
-        text = cm.getSelection();
-        if (type == 'bold') {
-            text = text.split('**').join('');
-            text = text.split('__').join('');
-        } else if (type == 'italic') {
-            text = text.split('*').join('');
-            text = text.split('_').join('');
-        } else if (type == 'strikethrough') {
-            text = text.split('~~').join('');
-        }
-        cm.replaceSelection(start + text + end);
-
-        startPoint.ch += start_chars.length;
-        endPoint.ch = startPoint.ch + text.length;
-    }
-
-    cm.setSelection(startPoint, endPoint);
-    cm.focus();
-}
-
-function _cleanBlock(cm) {
-    if (cm.getWrapperElement().lastChild.classList.contains('editor-preview-active'))
+function _cleanBlock(view) {
+    if (view.dom.lastChild && view.dom.lastChild.classList.contains('editor-preview-active'))
         return;
 
-    var startPoint = cm.getCursor('start');
-    var endPoint = cm.getCursor('end');
+    var startPoint = cm.getCursor(view, 'start');
+    var endPoint = cm.getCursor(view, 'end');
     var text;
 
+    var changes = [];
     for (var line = startPoint.line; line <= endPoint.line; line++) {
-        text = cm.getLine(line);
-        text = text.replace(/^[ ]*([# ]+|\*|-|[> ]+|[0-9]+(.|\)))[ ]*/, '');
+        text = cm.getLine(view, line);
+        var newText = text.replace(/^[ ]*([# ]+|\*|-|[> ]+|[0-9]+(.|\)))[ ]*/, '');
 
-        cm.replaceRange(text, {
-            line: line,
-            ch: 0,
-        }, {
-            line: line,
-            ch: 99999999999999,
+        changes.push({
+            from: cm.posToOffset(view.state.doc, { line: line, ch: 0 }),
+            to: cm.posToOffset(view.state.doc, { line: line, ch: text.length }),
+            insert: newText,
         });
+    }
+    
+    if (changes.length > 0) {
+        view.dispatch({ changes: changes });
     }
 }
 
@@ -1896,59 +1690,10 @@ function EasyMDE(options) {
     if (options.initialValue && (!this.options.autosave || this.options.autosave.foundSavedValue !== true)) {
         this.value(options.initialValue);
     }
-
-    if (options.uploadImage) {
-        var self = this;
-
-        this.codemirror.on('dragenter', function (cm, event) {
-            self.updateStatusBar('upload-image', self.options.imageTexts.sbOnDragEnter);
-            event.stopPropagation();
-            event.preventDefault();
-        });
-        this.codemirror.on('dragend', function (cm, event) {
-            self.updateStatusBar('upload-image', self.options.imageTexts.sbInit);
-            event.stopPropagation();
-            event.preventDefault();
-        });
-        this.codemirror.on('dragleave', function (cm, event) {
-            self.updateStatusBar('upload-image', self.options.imageTexts.sbInit);
-            event.stopPropagation();
-            event.preventDefault();
-        });
-
-        this.codemirror.on('dragover', function (cm, event) {
-            self.updateStatusBar('upload-image', self.options.imageTexts.sbOnDragEnter);
-            event.stopPropagation();
-            event.preventDefault();
-        });
-
-        this.codemirror.on('drop', function (cm, event) {
-            event.stopPropagation();
-            event.preventDefault();
-            if (options.imageUploadFunction) {
-                self.uploadImagesUsingCustomFunction(options.imageUploadFunction, event.dataTransfer.files);
-            } else {
-                self.uploadImages(event.dataTransfer.files);
-            }
-        });
-
-        this.codemirror.on('paste', function (cm, event) {
-            if (options.imageUploadFunction) {
-                self.uploadImagesUsingCustomFunction(options.imageUploadFunction, event.clipboardData.files);
-            } else {
-                self.uploadImages(event.clipboardData.files);
-            }
-        });
-    }
 }
 
 /**
  * Upload asynchronously a list of images to a server.
- *
- * Can be triggered by:
- * - drag&drop;
- * - copy-paste;
- * - the browse-file window (opened when the user clicks on the *upload-image* icon).
  * @param {FileList} files The files to upload the the server.
  * @param [onSuccess] {function} see EasyMDE.prototype.uploadImage
  * @param [onError] {function} see EasyMDE.prototype.uploadImage
@@ -2100,95 +1845,172 @@ EasyMDE.prototype.render = function (el) {
         }
     }
 
-    keyMaps['Enter'] = 'newlineAndIndentContinueMarkdownList';
-    keyMaps['Tab'] = 'tabAndIndentMarkdownList';
-    keyMaps['Shift-Tab'] = 'shiftTabAndUnindentMarkdownList';
-    keyMaps['Esc'] = function (cm) {
-        if (cm.getOption('fullScreen')) toggleFullScreen(self);
+    keyMaps['Esc'] = function () {
+        if (self.isFullscreen) toggleFullScreen(self);
     };
 
     this.documentOnKeyDown = function (e) {
         e = e || window.event;
 
         if (e.keyCode == 27) {
-            if (self.codemirror.getOption('fullScreen')) toggleFullScreen(self);
+            if (self.isFullscreen) toggleFullScreen(self);
         }
     };
     document.addEventListener('keydown', this.documentOnKeyDown, false);
 
-    var mode, backdrop;
+    // Build CM6 extensions array
+    var extensions = [
+        markdown(),
+        history(),
+        drawSelection(),
+        highlightSpecialChars(),
+        EditorView.lineWrapping,
+        search(),
+        fullscreen(),
+        syntaxHighlighting(defaultHighlightStyle),
+    ];
+    
+    // Add shortcode and object reference highlighting
+    // Pass shortcodeMap from options if provided (e.g., {':smile:': '<img src="...">'})
+    extensions.push(shortcodeHighlight(options.shortcodeMap));
 
-    // CodeMirror overlay mode
-    if (options.overlayMode) {
-        CodeMirror.defineMode('overlay-mode', function (config) {
-            return CodeMirror.overlayMode(CodeMirror.getMode(config, options.spellChecker !== false ? 'spell-checker' : 'gfm'), options.overlayMode.mode, options.overlayMode.combine);
-        });
-
-        mode = 'overlay-mode';
-        backdrop = options.parsingConfig;
-        backdrop.gitHubSpice = false;
-    } else {
-        mode = options.parsingConfig;
-        mode.name = 'gfm';
-        mode.gitHubSpice = false;
+    // Add line numbers if enabled
+    if (options.lineNumbers === true) {
+        extensions.push(lineNumbers());
+        extensions.push(highlightActiveLineGutter());
     }
-    if (options.spellChecker !== false) {
-        mode = 'spell-checker';
-        backdrop = options.parsingConfig;
-        backdrop.name = 'gfm';
-        backdrop.gitHubSpice = false;
 
-        if (typeof options.spellChecker === 'function') {
-            options.spellChecker({
-                codeMirrorInstance: CodeMirror,
-            });
-        } else {
-            CodeMirrorSpellChecker({
-                codeMirrorInstance: CodeMirror,
-            });
+    // Add placeholder if specified
+    var placeholderText = options.placeholder || el.getAttribute('placeholder') || '';
+    if (placeholderText) {
+        extensions.push(placeholder(placeholderText));
+    }
+
+    // Add highlight active line
+    extensions.push(highlightActiveLine());
+
+    // Build custom keymap for EasyMDE
+    var customKeys = [];
+    for (var keyName in keyMaps) {
+        if (Object.prototype.hasOwnProperty.call(keyMaps, keyName)) {
+            var binding = keyMaps[keyName];
+            if (typeof binding === 'function') {
+                customKeys.push({
+                    key: keyName,
+                    run: function(view) {
+                        binding(view);
+                        return true;
+                    },
+                });
+            }
         }
     }
 
-    // eslint-disable-next-line no-unused-vars
-    function configureMouse(cm, repeat, event) {
-        return {
-            addNew: false,
-        };
+    // Add keymaps
+    extensions.push(
+        keymap.of([
+            ...customKeys,
+            ...defaultKeymap,
+            ...historyKeymap,
+            ...searchKeymap,
+            indentWithTab,
+        ]),
+    );
+
+    // Tab size configuration
+    var tabSize = (options.tabSize != undefined) ? options.tabSize : 2;
+    extensions.push(EditorState.tabSize.of(tabSize));
+
+    // Direction (LTR/RTL)
+    if (options.direction === 'rtl') {
+        extensions.push(EditorView.editorAttributes.of({dir: 'rtl'}));
     }
 
-    this.codemirror = CodeMirror.fromTextArea(el, {
-        mode: mode,
-        backdrop: backdrop,
-        theme: (options.theme != undefined) ? options.theme : 'easymde',
-        tabSize: (options.tabSize != undefined) ? options.tabSize : 2,
-        indentUnit: (options.tabSize != undefined) ? options.tabSize : 2,
-        indentWithTabs: (options.indentWithTabs === false) ? false : true,
-        lineNumbers: (options.lineNumbers === true) ? true : false,
-        autofocus: (options.autofocus === true) ? true : false,
-        extraKeys: keyMaps,
-        direction: options.direction,
-        lineWrapping: (options.lineWrapping === false) ? false : true,
-        allowDropFileTypes: ['text/plain'],
-        placeholder: options.placeholder || el.getAttribute('placeholder') || '',
-        styleSelectedText: (options.styleSelectedText != undefined) ? options.styleSelectedText : !isMobile(),
-        scrollbarStyle: (options.scrollbarStyle != undefined) ? options.scrollbarStyle : 'native',
-        configureMouse: configureMouse,
-        inputStyle: (options.inputStyle != undefined) ? options.inputStyle : isMobile() ? 'contenteditable' : 'textarea',
-        spellcheck: (options.nativeSpellcheck != undefined) ? options.nativeSpellcheck : true,
-        autoRefresh: (options.autoRefresh != undefined) ? options.autoRefresh : false,
+    // Theme
+    var theme = (options.theme != undefined) ? options.theme : 'easymde';
+    extensions.push(EditorView.theme({}, {dark: theme === 'easymde-dark'}));
+
+    // Spell check
+    if (options.nativeSpellcheck !== false) {
+        extensions.push(EditorView.contentAttributes.of({spellcheck: 'true'}));
+    }
+
+    // Image upload handlers
+    if (options.uploadImage) {
+        extensions.push(imageUploadPlugin({
+            onDragEnter: function() {
+                self.updateStatusBar('upload-image', self.options.imageTexts.sbOnDragEnter);
+            },
+            onDragEnd: function() {
+                self.updateStatusBar('upload-image', self.options.imageTexts.sbInit);
+            },
+            onDragLeave: function() {
+                self.updateStatusBar('upload-image', self.options.imageTexts.sbInit);
+            },
+            onDragOver: function() {
+                self.updateStatusBar('upload-image', self.options.imageTexts.sbOnDragEnter);
+            },
+            onDrop: function(files) {
+                if (options.imageUploadFunction) {
+                    self.uploadImagesUsingCustomFunction(options.imageUploadFunction, files);
+                } else {
+                    self.uploadImages(files);
+                }
+            },
+            onPaste: function(files) {
+                if (options.imageUploadFunction) {
+                    self.uploadImagesUsingCustomFunction(options.imageUploadFunction, files);
+                } else {
+                    self.uploadImages(files);
+                }
+            },
+        }));
+    }
+
+    // Create update listener for change events and forceSync
+    extensions.push(EditorView.updateListener.of(function(update) {
+        if (update.docChanged && self.cm) {
+            if (options.forceSync === true && self.element) {
+                self.element.value = cm.getValue(self.cm);
+            }
+            // Trigger autosave if configured
+            if (self.autosaveTimeoutId) {
+                clearTimeout(self.autosaveTimeoutId);
+            }
+            if (self.options && self.options.autosave && self.options.autosave.enabled) {
+                self.autosaveTimeoutId = setTimeout(function() {
+                    self.autosave();
+                }, self.options.autosave.delay || 10000);
+            }
+        }
+    }));
+
+    // Create the EditorView
+    var view = new EditorView({
+        doc: el.value || '',
+        extensions: extensions,
     });
 
-    this.codemirror.getScrollerElement().style.minHeight = options.minHeight;
+    // Store the CM6 view and options
+    this.cm = view;
+    this.options = options;
+    this.element = el;
+    this.isFullscreen = false;
+    
+    // Store fullscreen toggle for keymap
+    this.toggleFullscreen = function() {
+        view.dispatch({ effects: toggleFullscreenEffect.of(null) });
+    };
+
+    // Insert the editor after the textarea
+    el.style.display = 'none';
+    el.parentNode.insertBefore(view.dom, el.nextSibling);
+
+    // Apply min/max height
+    view.scrollDOM.style.minHeight = options.minHeight;
 
     if (typeof options.maxHeight !== 'undefined') {
-        this.codemirror.getScrollerElement().style.height = options.maxHeight;
-    }
-
-    if (options.forceSync === true) {
-        var cm = this.codemirror;
-        cm.on('change', function () {
-            cm.save();
-        });
+        view.scrollDOM.style.height = options.maxHeight;
     }
 
     this.gui = {};
@@ -2198,7 +2020,7 @@ EasyMDE.prototype.render = function (el) {
     var easyMDEContainer = document.createElement('div');
     easyMDEContainer.classList.add('EasyMDEContainer');
     easyMDEContainer.setAttribute('role', 'application');
-    var cmWrapper = this.codemirror.getWrapperElement();
+    var cmWrapper = view.dom;
     cmWrapper.parentNode.insertBefore(easyMDEContainer, cmWrapper);
     easyMDEContainer.appendChild(cmWrapper);
 
@@ -2210,17 +2032,12 @@ EasyMDE.prototype.render = function (el) {
     }
     if (options.autosave != undefined && options.autosave.enabled === true) {
         this.autosave(); // use to load localstorage content
-        this.codemirror.on('change', function () {
-            clearTimeout(self._autosave_timeout);
-            self._autosave_timeout = setTimeout(function () {
-                self.autosave();
-            }, self.options.autosave.submit_delay || self.options.autosave.delay || 1000);
-        });
     }
 
     function calcHeight(naturalWidth, naturalHeight) {
         var height;
-        var viewportWidth = window.getComputedStyle(document.querySelector('.CodeMirror-sizer')).width.replace('px', '');
+        var contentEl = document.querySelector('.cm-content') || document.querySelector('.cm-scroller');
+        var viewportWidth = contentEl ? window.getComputedStyle(contentEl).width.replace('px', '') : 800;
         if (naturalWidth < viewportWidth) {
             height = naturalHeight + 'px';
         } else {
@@ -2229,14 +2046,11 @@ EasyMDE.prototype.render = function (el) {
         return height;
     }
 
-    var _vm = this;
-
-
     function assignImageBlockAttributes(parentEl, img) {
         var url = (new URL(img.url, document.baseURI)).href;
         parentEl.setAttribute('data-img-src', url);
         parentEl.setAttribute('style', '--bg-image:url(' + url + ');--width:' + img.naturalWidth + 'px;--height:' + calcHeight(img.naturalWidth, img.naturalHeight));
-        _vm.codemirror.setSize();
+        // CM6 handles editor resizing automatically
     }
 
     function handleImages() {
@@ -2287,22 +2101,22 @@ EasyMDE.prototype.render = function (el) {
         });
     }
 
-    this.codemirror.on('update', function () {
-        handleImages();
+    // Add CM6 update listener for image handling
+    var imageUpdateEffect = EditorView.updateListener.of(function(update) {
+        if (update.docChanged || update.viewportChanged) {
+            handleImages();
+        }
     });
+    view.dispatch({ effects: StateEffect.appendConfig.of([imageUpdateEffect]) });
 
     this.gui.sideBySide = this.createSideBySide();
     this._rendered = this.element;
 
     if (options.autofocus === true || el.autofocus) {
-        this.codemirror.focus();
+        view.focus();
     }
 
-    // Fixes CodeMirror bug (#344)
-    var temp_cm = this.codemirror;
-    setTimeout(function () {
-        temp_cm.refresh();
-    }.bind(temp_cm), 0);
+    // No need for CM6 refresh (removed CM5 workaround)
 };
 
 EasyMDE.prototype.cleanup = function () {
@@ -2349,7 +2163,7 @@ EasyMDE.prototype.autosave = function () {
 
         if (this.options.autosave.loaded !== true) {
             if (typeof localStorage.getItem('smde_' + this.options.autosave.uniqueId) == 'string' && localStorage.getItem('smde_' + this.options.autosave.uniqueId) != '') {
-                this.codemirror.setValue(localStorage.getItem('smde_' + this.options.autosave.uniqueId));
+                cm.setValue(this.cm, localStorage.getItem('smde_' + this.options.autosave.uniqueId));
                 this.options.autosave.foundSavedValue = true;
             }
 
@@ -2547,8 +2361,7 @@ EasyMDE.prototype.uploadImageUsingCustomFunction = function (imageUploadFunction
 };
 
 EasyMDE.prototype.setPreviewMaxHeight = function () {
-    var cm = this.codemirror;
-    var wrapper = cm.getWrapperElement();
+    var wrapper = this.cm.dom;
     var preview = wrapper.nextSibling;
 
     // Calc preview max height
@@ -2562,13 +2375,13 @@ EasyMDE.prototype.setPreviewMaxHeight = function () {
 };
 
 EasyMDE.prototype.createSideBySide = function () {
-    var cm = this.codemirror;
-    var wrapper = cm.getWrapperElement();
+    var view = this.cm;
+    var wrapper = view.dom;
     var preview = wrapper.nextSibling;
 
     if (!preview || !preview.classList.contains('editor-preview-side')) {
         preview = document.createElement('div');
-        preview.className = 'editor-preview-side';
+        preview.className = 'editor-preview-side editor-preview';
 
         if (this.options.previewClass) {
 
@@ -2590,17 +2403,19 @@ EasyMDE.prototype.createSideBySide = function () {
     }
 
     if (this.options.syncSideBySidePreviewScroll === false) return preview;
+    
     // Syncs scroll  editor -> preview
     var cScroll = false;
     var pScroll = false;
-    cm.on('scroll', function (v) {
+    var scrollDOM = view.scrollDOM;
+    scrollDOM.addEventListener('scroll', function () {
         if (cScroll) {
             cScroll = false;
             return;
         }
         pScroll = true;
-        var height = v.getScrollInfo().height - v.getScrollInfo().clientHeight;
-        var ratio = parseFloat(v.getScrollInfo().top) / height;
+        var height = scrollDOM.scrollHeight - scrollDOM.clientHeight;
+        var ratio = parseFloat(scrollDOM.scrollTop) / height;
         var move = (preview.scrollHeight - preview.clientHeight) * ratio;
         preview.scrollTop = move;
     });
@@ -2614,8 +2429,8 @@ EasyMDE.prototype.createSideBySide = function () {
         cScroll = true;
         var height = preview.scrollHeight - preview.clientHeight;
         var ratio = parseFloat(preview.scrollTop) / height;
-        var move = (cm.getScrollInfo().height - cm.getScrollInfo().clientHeight) * ratio;
-        cm.scrollTo(0, move);
+        var move = (scrollDOM.scrollHeight - scrollDOM.clientHeight) * ratio;
+        scrollDOM.scrollTop = move;
     };
     return preview;
 };
@@ -2704,23 +2519,45 @@ EasyMDE.prototype.createToolbar = function (items) {
     self.toolbar_div = bar;
     self.toolbarElements = toolbarData;
 
-    var cm = this.codemirror;
-    cm.on('cursorActivity', function () {
-        var stat = getState(cm);
-
-        for (var key in toolbarData) {
-            (function (key) {
-                var el = toolbarData[key];
-                if (stat[key]) {
-                    el.classList.add('active');
-                } else if (key != 'fullscreen' && key != 'side-by-side') {
-                    el.classList.remove('active');
-                }
-            })(key);
+    var view = this.cm;
+    if (!view) {
+        console.error('EasyMDE: Editor view not initialized when creating toolbar');
+        return bar;
+    }
+    
+    // Debug: Check what's available
+    if (typeof EditorView.updateListener === 'undefined') {
+        console.error('EasyMDE: EditorView.updateListener is undefined');
+        console.log('EditorView keys:', Object.keys(EditorView));
+        console.log('viewModule keys:', Object.keys(viewModule));
+    }
+    
+    // Add CM6 update listener for cursor activity
+    var updateListenerFacet = EditorView.updateListener;
+    if (!updateListenerFacet) {
+        console.error('EasyMDE: Cannot find updateListener facet');
+        return bar;
+    }
+    
+    var cursorUpdateEffect = updateListenerFacet.of(function(update) {
+        if (update.selectionSet) {
+            var stat = getState(view);
+            for (var key in toolbarData) {
+                (function (key) {
+                    var el = toolbarData[key];
+                    if (stat[key]) {
+                        el.classList.add('active');
+                    } else if (key != 'fullscreen' && key != 'side-by-side') {
+                        el.classList.remove('active');
+                    }
+                })(key);
+            }
         }
     });
+    
+    view.dispatch({ effects: StateEffect.appendConfig.of([cursorUpdateEffect]) });
 
-    var cmWrapper = cm.getWrapperElement();
+    var cmWrapper = view.dom;
     cmWrapper.parentNode.insertBefore(bar, cmWrapper);
     return bar;
 };
@@ -2729,7 +2566,7 @@ EasyMDE.prototype.createStatusbar = function (status) {
     // Initialize
     status = status || this.options.status;
     var options = this.options;
-    var cm = this.codemirror;
+    var view = this.cm;
 
     // Make sure the status variable is valid
     if (!status || status.length === 0) {
@@ -2760,24 +2597,24 @@ EasyMDE.prototype.createStatusbar = function (status) {
 
             if (name === 'words') {
                 defaultValue = function (el) {
-                    el.innerHTML = wordCount(cm.getValue());
+                    el.innerHTML = wordCount(cm.getValue(view));
                 };
                 onUpdate = function (el) {
-                    el.innerHTML = wordCount(cm.getValue());
+                    el.innerHTML = wordCount(cm.getValue(view));
                 };
             } else if (name === 'lines') {
                 defaultValue = function (el) {
-                    el.innerHTML = cm.lineCount();
+                    el.innerHTML = cm.lineCount(view);
                 };
                 onUpdate = function (el) {
-                    el.innerHTML = cm.lineCount();
+                    el.innerHTML = cm.lineCount(view);
                 };
             } else if (name === 'cursor') {
                 defaultValue = function (el) {
                     el.innerHTML = '1:1';
                 };
                 onActivity = function (el) {
-                    var pos = cm.getCursor();
+                    var pos = cm.getCursor(view);
                     var posLine = pos.line + 1;
                     var posColumn = pos.ch + 1;
                     el.innerHTML = posLine + ':' + posColumn;
@@ -2829,19 +2666,27 @@ EasyMDE.prototype.createStatusbar = function (status) {
         // Ensure the onUpdate is a function
         if (typeof item.onUpdate === 'function') {
             // Create a closure around the span of the current action, then execute the onUpdate handler
-            this.codemirror.on('update', (function (el, item) {
-                return function () {
-                    item.onUpdate(el);
+            // Use CM6 update listener
+            var updateEffect = EditorView.updateListener.of((function (el, item) {
+                return function (update) {
+                    if (update.docChanged) {
+                        item.onUpdate(el);
+                    }
                 };
             }(el, item)));
+            view.dispatch({ effects: StateEffect.appendConfig.of([updateEffect]) });
         }
         if (typeof item.onActivity === 'function') {
             // Create a closure around the span of the current action, then execute the onActivity handler
-            this.codemirror.on('cursorActivity', (function (el, item) {
-                return function () {
-                    item.onActivity(el);
+            // Use CM6 selection update listener
+            var activityEffect = EditorView.updateListener.of((function (el, item) {
+                return function (update) {
+                    if (update.selectionSet) {
+                        item.onActivity(el);
+                    }
                 };
             }(el, item)));
+            view.dispatch({ effects: StateEffect.appendConfig.of([activityEffect]) });
         }
 
 
@@ -2851,7 +2696,7 @@ EasyMDE.prototype.createStatusbar = function (status) {
 
 
     // Insert the status bar into the DOM
-    var cmWrapper = this.codemirror.getWrapperElement();
+    var cmWrapper = this.cm.dom;
     cmWrapper.parentNode.insertBefore(bar, cmWrapper.nextSibling);
     return bar;
 };
@@ -2860,13 +2705,13 @@ EasyMDE.prototype.createStatusbar = function (status) {
  * Get or set the text content.
  */
 EasyMDE.prototype.value = function (val) {
-    var cm = this.codemirror;
+    var view = this.cm;
     if (val === undefined) {
-        return cm.getValue();
+        return cm.getValue(view);
     } else {
-        cm.getDoc().setValue(val);
+        cm.setValue(view, val);
         if (this.isPreviewActive()) {
-            var wrapper = cm.getWrapperElement();
+            var wrapper = view.dom;
             var preview = wrapper.lastChild;
             var preview_result = this.options.previewRender(val, preview);
             if (preview_result !== null) {
@@ -2992,36 +2837,30 @@ EasyMDE.prototype.toggleFullScreen = function () {
 };
 
 EasyMDE.prototype.isPreviewActive = function () {
-    var cm = this.codemirror;
-    var wrapper = cm.getWrapperElement();
+    var wrapper = this.cm.dom;
     var preview = wrapper.lastChild;
 
     return preview.classList.contains('editor-preview-active');
 };
 
 EasyMDE.prototype.isSideBySideActive = function () {
-    var cm = this.codemirror;
-    var wrapper = cm.getWrapperElement();
+    var wrapper = this.cm.dom;
     var preview = wrapper.nextSibling;
 
     return preview.classList.contains('editor-preview-active-side');
 };
 
 EasyMDE.prototype.isFullscreenActive = function () {
-    var cm = this.codemirror;
-
-    return cm.getOption('fullScreen');
+    return this.isFullscreen || false;
 };
 
 EasyMDE.prototype.getState = function () {
-    var cm = this.codemirror;
-
-    return getState(cm);
+    return getState(this.cm);
 };
 
 EasyMDE.prototype.toTextArea = function () {
-    var cm = this.codemirror;
-    var wrapper = cm.getWrapperElement();
+    var view = this.cm;
+    var wrapper = view.dom;
     var easyMDEContainer = wrapper.parentNode;
 
     if (easyMDEContainer) {
@@ -3036,11 +2875,13 @@ EasyMDE.prototype.toTextArea = function () {
         }
     }
 
-    // Unwrap easyMDEcontainer before codemirror toTextArea() call
+    // Unwrap easyMDEcontainer before removing editor
     easyMDEContainer.parentNode.insertBefore(wrapper, easyMDEContainer);
     easyMDEContainer.remove();
 
-    cm.toTextArea();
+    // Destroy CM6 view and show textarea
+    view.destroy();
+    this.element.style.display = '';
 
     if (this.autosaveTimeoutId) {
         clearTimeout(this.autosaveTimeoutId);
