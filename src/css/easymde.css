@@ -84,15 +84,6 @@
     white-space: nowrap;
 }
 
-/* Active line */
-.cm-activeLine {
-    background-color: #f0f0f0;
-}
-
-.cm-activeLineGutter {
-    background-color: #e8e8e8;
-}
-
 /* EasyMDE Container Compatibility */
 .EasyMDEContainer .cm-editor {
     box-sizing: border-box;

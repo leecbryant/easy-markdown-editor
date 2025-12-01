@@ -85,6 +85,11 @@ function createShortcodePlugin(shortcodeMap) {
             }
         }
         
+        // Sort decorations by position (required by CodeMirror 6)
+        decorations.sort(function(a, b) {
+            return a.from - b.from;
+        });
+        
         return Decoration.set(decorations);
     });
     
