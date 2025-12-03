@@ -811,11 +811,20 @@ function toggleSideBySide(editor) {
         if (newValue != null) {
             preview.innerHTML = newValue;
         }
-        // Add CM6 update listener
+        // Add CM6 update listener with debouncing
         if (!editor._sideBySideUpdateEffect) {
+            var debounceTimeout = null;
             editor._sideBySideUpdateEffect = EditorView.updateListener.of(function(update) {
                 if (update.docChanged && editor._sideBySideRenderingFunction) {
-                    editor._sideBySideRenderingFunction();
+                    // Clear existing timeout
+                    if (debounceTimeout) {
+                        clearTimeout(debounceTimeout);
+                    }
+                    // Debounce the rendering to avoid blocking typing
+                    debounceTimeout = setTimeout(function() {
+                        editor._sideBySideRenderingFunction();
+                        debounceTimeout = null;
+                    }, 300); // 300ms delay
                 }
             });
             view.dispatch({ effects: StateEffect.appendConfig.of([editor._sideBySideUpdateEffect]) });
