@@ -1982,6 +1982,12 @@ EasyMDE.prototype.render = function (el) {
             if (options.forceSync === true && self.element) {
                 self.element.value = cm.getValue(self.cm);
             }
+            // Fire input event on the textarea for external listeners
+            // CM6 doesn't natively fire input events, so we dispatch synthetic ones
+            if (self.element) {
+                var inputEvent = new Event('input', { bubbles: true, cancelable: true });
+                self.element.dispatchEvent(inputEvent);
+            }
             // Trigger autosave if configured
             if (self.autosaveTimeoutId) {
                 clearTimeout(self.autosaveTimeoutId);
