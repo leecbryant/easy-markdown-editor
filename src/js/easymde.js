@@ -30,6 +30,7 @@ var fullscreen = require('./codemirror/fullscreen').fullscreen;
 var toggleFullscreenEffect = require('./codemirror/fullscreen').toggleFullscreenEffect;
 var imageUploadPlugin = require('./codemirror/image-upload').imageUploadPlugin;
 var shortcodeHighlight = require('./codemirror/shortcode-highlight').shortcodeHighlight;
+var inlineTokenHighlight = require('./codemirror/shortcode-highlight').inlineTokenHighlight;
 
 // CM helper functions
 var cm = require('./codemirror/editor-helpers');
@@ -1882,6 +1883,12 @@ EasyMDE.prototype.render = function (el) {
     // Add shortcode and object reference highlighting
     // Pass shortcodeMap from options if provided (e.g., {':smile:': '<img src="...">'})
     extensions.push(shortcodeHighlight(options.shortcodeMap));
+
+    // Add inline token rendering if custom token definitions are provided.
+    // Each entry: { pattern: /regex/g, toDOM: function(match) { return domElement; } }
+    if (Array.isArray(options.inlineTokens) && options.inlineTokens.length > 0) {
+        extensions.push(inlineTokenHighlight(options.inlineTokens));
+    }
 
     // Add line numbers if enabled
     if (options.lineNumbers === true) {
