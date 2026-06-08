@@ -1,13 +1,20 @@
 // Placeholder extension for CodeMirror 6
 // Simplified implementation using just DOM manipulation
-var { EditorView } = require('@codemirror/view');
+var { EditorView, ViewPlugin } = require('@codemirror/view');
 
 function placeholder(text) {
     return [
-        EditorView.updateListener.of(function(update) {
-            if (update.docChanged) {
-                updatePlaceholder(update.view, text);
-            }
+        // Render the placeholder once when the editor is created so it is
+        // visible on initial mount (not only after the first docChanged/focus).
+        ViewPlugin.define(function(view) {
+            updatePlaceholder(view, text);
+            return {
+                update: function(update) {
+                    if (update.docChanged) {
+                        updatePlaceholder(update.view, text);
+                    }
+                },
+            };
         }),
         EditorView.domEventHandlers({
             focus: function(event, view) {
